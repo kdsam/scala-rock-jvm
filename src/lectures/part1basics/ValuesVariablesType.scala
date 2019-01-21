@@ -21,4 +21,11 @@ object ValuesVariablesType extends App {
   val aFloat: Float = 2.0f
   val aDouble: Double = 3.14
 
+  // variables
+  var aVariable: Int = 4
+
+  aVariable = 5 // side effects
+
+
+
 }
