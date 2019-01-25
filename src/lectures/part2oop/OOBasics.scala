@@ -14,6 +14,10 @@ object OOBasics extends App {
   println(novel.authorAge)
   println(novel.isWrittenBy(imposter))
 
+  val counter = new Counter(0)
+  counter.inc.print
+  counter.inc.inc.inc.print
+  counter.inc(10).print
 }
 
 // constructor
@@ -66,5 +70,25 @@ class Novel(name: String, year: Int, author: Writer) {
     - method to increment/decrement => new Counter
     - overload inc/dec to receive an amount
  */
+class Counter(val count: Int = 0) {
+  def inc = {
+    println("incrementing")
+    new Counter(count + 1) // immutability
+  }
+  def dec = {
+    println("decrementing")
+    new Counter(count - 1)
+  }
+
+  def inc(n: Int): Counter = {
+    if (n <= 0) this
+    else inc.inc(n - 1)
+  }
+  def dec(n: Int): Counter = {
+    if (n <= 0) this
+    else dec.dec(n - 1)
+  }
+  def print = println(count);
+}
 
 // class parameters are NOT FIELDS
