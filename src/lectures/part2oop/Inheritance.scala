@@ -1,6 +1,6 @@
 package lectures.part2oop
 
-object InheritanceAndTraits extends App {
+object Inheritance extends App {
 
   sealed class Animal {
     val creatureType = "wild"
@@ -49,5 +49,7 @@ object InheritanceAndTraits extends App {
   // 1 - use final on member
   // 2 - use final on the entire class
   // 3 - seal the class = extend classes in THIS FILE, prevent extension
+
+
 
 }
