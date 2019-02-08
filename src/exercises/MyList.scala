@@ -143,10 +143,10 @@ object ListTest extends App {
   val listOfIntegers: MyList[Int] = new Cons(1, new Cons(2, new Cons(3, Empty)))
   val cloneListOfIntegers: MyList[Int] = new Cons(1, new Cons(2, new Cons(3, Empty)))
   val anotherListOfIntegers: MyList[Int] = new Cons(4, new Cons(5, Empty))
-  val listOfString: MyList[String] = new Cons("Hello", new Cons("Scala", Empty))
+  val listOfStrings: MyList[String] = new Cons("Hello", new Cons("Scala", Empty))
 
   println(listOfIntegers.toString)
-  println(listOfString.toString)
+  println(listOfStrings.toString)
 
   println(listOfIntegers.map(_ * 2).toString)
 
@@ -163,7 +163,16 @@ object ListTest extends App {
 
   println(listOfIntegers.sort((x, y) => y - x))
 
-  println(anotherListOfIntegers.zipWith[String, String](listOfString, _ + "-" + _))
+  println(anotherListOfIntegers.zipWith[String, String](listOfStrings, _ + "-" + _))
 
   println(listOfIntegers.fold(0)(_ + _))
+
+
+  // for comprehensions
+  val combinations = for {
+    n <- listOfIntegers
+    string <- listOfStrings
+  } yield n + "-" + string
+
+  println(combinations)
 }
