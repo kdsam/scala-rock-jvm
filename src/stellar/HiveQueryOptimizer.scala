@@ -1,10 +1,7 @@
 package stellar
 
-import stellar.HiveQueryUtils.{EQUAL_OPERATOR, FALSE_EXPR, TRUE_EXPR}
-
 import scala.collection.mutable.ListBuffer
 import scala.util.Try
-
 
 /**
   * TODO: Documentation
@@ -22,8 +19,8 @@ object HiveQueryOptimizer {
   def parseToSql(ast: ASTNode): String = {
 
     ast.getToken.getType match {
-      case TOK_QUERY => {
-        var qstring = "SELECT"
+      case TOK_QUERY =>
+        var qstring = SQL_SELECT
         // get SELECT
         for {
           child <- ast.getChildren.toList
@@ -49,21 +46,62 @@ object HiveQueryOptimizer {
             l2child <- child.getChildren.toList
             if l2child != null && l2child.getToken.getType == TOK_WHERE
           } {
+            if (ast.getToken.getType == TOK_SUBQUERY_EXPR) parseToSql(ast)
             qstring += parseWhereExpr(l2child)
           }
         }
-        qstring
-      }
-      case _ => ""
 
+        // get ORDER BY
+        for {
+          child <- ast.getChildren.toList
+          if child != null && child.getToken.getType == TOK_INSERT
+        } {
+          for {
+            l2child <- child.getChildren.toList
+            if l2child != null && l2child.getToken.getType == TOK_ORDERBY
+          } {
+            qstring += parseOrderBy(l2child)
+          }
+        }
+        qstring
+      case TOK_SUBQUERY_EXPR =>
+        var appendStr = EMPTY
+        // parse Subquery Operation
+        for {
+          child <- ast.getChildren.toList
+          if child != null && child.getToken.getType == TOK_SUBQUERY_OP
+        } {
+          for {
+            child <- ast.getChildren.toList
+            if child != null && child.getToken.getType == TOK_TABLE_OR_COL
+          } {
+            child.getChildren.toList match {
+              case c1 :: Nil => appendStr += BLANK + c1.getToken.getText
+//              case _ => // forced to throw error for unhandled cases
+            }
+          }
+          appendStr += BLANK + SQL_IN
+        }
+
+        // parse Subquery
+        appendStr += OPEN_PAREN
+        for {
+          child <- ast.getChildren.toList
+          if child != null && child.getToken.getType == TOK_QUERY
+        } {
+          appendStr += parseToSql(child)
+        }
+        appendStr += CLOSE_PAREN
+        appendStr
+//      case _ => "" // forced to throw error for unhandled cases
     }
   }
 
   def parseFrom(ast: ASTNode): String = {
-    var appendStr = ""
-    var db = ""
-    var table = ""
-    var alias = ""
+    var appendStr = EMPTY
+    var db = EMPTY
+    var table = EMPTY
+    var alias = EMPTY
     for {
       child <- ast.getChildren.toList
       if child != null && child.getToken.getType == TOK_TABREF
@@ -73,29 +111,33 @@ object HiveQueryOptimizer {
         if l2child != null
       } {
         l2child.getToken.getType match {
-          case TOK_TABNAME => {
+          case TOK_TABNAME =>
             l2child.getChildren.toList match {
-              case c1 :: c2 :: Nil => {
+              case c1 :: c2 :: Nil =>
                 db = c1.getText
                 table = c2.getText
-              }
-              case c1 :: Nil => table = c1.getText
+              case _ => table = l2child.getChild(0).getText
             }
-          }
           case _ => alias = l2child.getText
         }
       }
     }
-    appendStr += " FROM " + (if(db.isEmpty) "" else s"$db.") + table + (if(alias.isEmpty) "" else s" $alias")
+    appendStr += BLANK + SQL_FROM + BLANK + (if (db.isEmpty) EMPTY
+                                             else
+                                               db + SL_DOT) + table + (if (alias.isEmpty)
+                                                                         EMPTY
+                                                                       else
+                                                                         BLANK + alias)
     appendStr
   }
 
   def parseSelectExpr(ast: ASTNode): String = {
-    var appendStr = ""
+    var appendStr = EMPTY
     for {
       child <- ast.getChildren.toList
       if child != null && child.getToken.getType == TOK_SELECT
     } {
+      var selFieldCtr = 0;
       for {
         l2child <- child.getChildren.toList
         if l2child != null && l2child.getToken.getType == TOK_SELEXPR
@@ -105,8 +147,43 @@ object HiveQueryOptimizer {
           if l3child != null
         } {
           l3child.getToken.getType match {
-            case TOK_ALLCOLREF => appendStr = " *"
-            case _ =>
+            case TOK_ALLCOLREF =>
+              selFieldCtr += 1
+              appendStr += BLANK
+              if (selFieldCtr > 1) appendStr += SL_COMMA
+              if (l3child.getChild(0) != null) {
+                appendStr += l3child
+                  .getChild(0)
+                  .getChild(0)
+                  .asInstanceOf[ASTNode]
+                  .getToken
+                  .getText + SL_DOT
+              }
+              appendStr += SQL_ALL
+            case TOK_TABLE_OR_COL =>
+              selFieldCtr += 1
+              l3child.getChildren.toList match {
+                case c1 :: Nil =>
+                  if (selFieldCtr > 1) appendStr += SL_COMMA
+                  appendStr += BLANK + c1.getToken.getText
+//              case _ => // forced to throw error for unhandled cases
+              }
+            case DOT =>
+              selFieldCtr += 1
+              if (selFieldCtr > 1) appendStr += SL_COMMA
+              appendStr += BLANK
+              appendStr += l3child
+                .getChild(0)
+                .getChild(0)
+                .asInstanceOf[ASTNode]
+                .getToken
+                .getText + SL_DOT
+              appendStr += l3child
+                .getChild(1)
+                .asInstanceOf[ASTNode]
+                .getToken
+                .getText
+//            case _ => // forced to throw error for unhandled cases
           }
         }
       }
@@ -114,66 +191,21 @@ object HiveQueryOptimizer {
     appendStr
   }
 
-
-
   def parseWhereExpr(ast: ASTNode): String = {
-    val rootExpr = parseWhere(ast)
-    " WHERE" + getWhereStr(rootExpr)
-  }
-
-  def getWhereStr(rootExpr: Expr): String = {
-    rootExpr match {
-      case AndLogicalExpr(children) => {
-        var andStr = ""
-        var counter = 0
-        for {
-          child <- children.toList
-          if child != null
-        } {
-          counter += 1
-          if (counter == 1) andStr += getWhereStr(child)
-          else andStr += " AND" + getWhereStr(child)
-        }
-        andStr
-      }
-      case LogicalExpr(children) => {
-        var lStr = ""
-        for {
-          child <- children.toList
-          if child != null
-        } {
-          lStr += getWhereStr(child)
-        }
-        lStr
-      }
-      case BinaryExpr(column, operator, constantExpression) => {
-        val bStr = (if (column.alias.isEmpty) " " else s" ${column.alias.get}.") +
-          s"${column.name} $operator ${constantExpression.value}"
-        applyOptimization(bStr, column, operator, constantExpression)
-      }
-      case _ => ""
+    var whereStr = BLANK + SQL_WHERE
+    val child1 = ast.getChild(0).asInstanceOf[ASTNode]
+    if (child1.getToken.getType == TOK_SUBQUERY_EXPR)
+      whereStr += parseToSql(child1)
+    else {
+      val rootExpr = parseWhere(ast)
+      whereStr += getWhereStr(rootExpr)
     }
+    whereStr
   }
 
-  def applyOptimization(bStr: String,
-                        column: Column,
-                        operator: String,
-                        constantExpression: ConstantExpr): String = {
-    var optimized = bStr
-    // TODO: make optimization fields dynamic instead of hardcoding
-    if(column.name.equalsIgnoreCase("member_id")) {
-      val constantVal = constantExpression.value
-      val partitionVal = constantVal.substring(constantVal.size - 3)
-      optimized += " AND" + (if (column.alias.isEmpty) " " else s" ${column.alias.get}.") +
-        s"last_digits $operator '${partitionVal}"
-    }
-    optimized
-  }
-
-
-  def parseWhere(ast: ASTNode): Expr = {
+  private def parseWhere(ast: ASTNode): Expr = {
     ast.getToken.getType match {
-      case TOK_WHERE => {
+      case TOK_WHERE =>
         val root = new LogicalExpr(ListBuffer())
         for {
           child <- ast.getChildren.toList
@@ -182,8 +214,16 @@ object HiveQueryOptimizer {
           root.children += parseWhere(child)
         }
         root
-      }
-      case KW_AND => {
+      case KW_OR =>
+        val orExpr = OrLogicalExpr(ListBuffer())
+        for {
+          child <- ast.getChildren.toList
+          if child != null
+        } {
+          orExpr.children += parseWhere(child)
+        }
+        orExpr
+      case KW_AND =>
         val andExpr = AndLogicalExpr(ListBuffer())
         for {
           child <- ast.getChildren.toList
@@ -192,214 +232,166 @@ object HiveQueryOptimizer {
           andExpr.children += parseWhere(child)
         }
         andExpr
-      }
-      case EQUAL => {
-        var colName: String = ""
-        var tableAlias: String = ""
-        var value: String = ""
+      case EQUAL | EQUAL_NS | GREATERTHAN | GREATERTHANOREQUALTO | LESSTHAN |
+           LESSTHANOREQUALTO  =>
+        var colName: String = EMPTY
+        var tableAlias: String = EMPTY
+        var value: String = EMPTY
         for {
           child <- ast.getChildren.toList
           if child != null
         } {
           child.getToken.getType match {
-            case TOK_TABLE_OR_COL => {
+            case TOK_TABLE_OR_COL =>
               colName = child.getChild(0).getText
-            }
-            case DOT => {
+            case DOT =>
               tableAlias = child.getChild(0).getChild(0).getText
               colName = child.getChild(1).getText
-            }
-            case KW_TRUE => {
+            case KW_TRUE =>
               value = TRUE_EXPR
-            }
-            case KW_FALSE => {
+            case KW_FALSE =>
               value = FALSE_EXPR
-            }
-            case StringLiteral => {
+            case StringLiteral =>
               value = child.getText
-            }
+            case Number =>
+              value = child.getText
           }
         }
-        val column = if (tableAlias.isEmpty) Column(colName) else Column(colName, Some(tableAlias))
-        BinaryExpr(column,  EQUAL_OPERATOR, ConstantExpr(value))
-      }
+        val column =
+          if (tableAlias.isEmpty) Column(colName)
+          else Column(colName, Some(tableAlias))
+        BinaryExpr(column, ast.getToken.getText, ConstantExpr(value))
       case _ => new LogicalExpr(ListBuffer())
     }
   }
 
-  def parse(ast: ASTNode): List[Expr] = {
-    val buffer = ListBuffer[Expr]()
+  private def getWhereStr(rootExpr: Expr): String = {
+    rootExpr match {
+      case AndLogicalExpr(children) =>
+        var andStr = EMPTY
+        var counter = 0
+        for {
+          child <- children.toList
+          if child != null
+        } {
+          counter += 1
+          child match {
+            case LogicalExpr(_) =>
+              if (counter == 1) andStr += BLANK + OPEN_PAREN  + (getWhereStr(child)).substring(1) +
+                CLOSE_PAREN
+              else andStr += BLANK + SQL_AND + BLANK + OPEN_PAREN  + (getWhereStr(child)).substring(1) +
+                CLOSE_PAREN
+            case _ =>
+              if (counter == 1)  andStr += getWhereStr(child)
+              else andStr += BLANK + SQL_AND + getWhereStr(child)
+          }
+        }
+        andStr
+      case OrLogicalExpr(children) =>
+        var orStr = EMPTY
+        var counter = 0
+        for {
+          child <- children.toList
+          if child != null
+        } {
+          counter += 1
+          child match {
+            case LogicalExpr(_) =>
+              if (counter == 1) orStr += BLANK + OPEN_PAREN + (getWhereStr(child)).substring(1) +
+                CLOSE_PAREN
+              else orStr += BLANK + SQL_OR + BLANK + OPEN_PAREN + (getWhereStr(child)).substring(1) +
+                CLOSE_PAREN
+            case _ =>
+              if (counter == 1)  orStr += getWhereStr(child)
+              else orStr += BLANK + SQL_OR + getWhereStr(child)
+          }
+        }
+        orStr
+      case LogicalExpr(children) =>
+        var lStr = EMPTY
+        for {
+          child <- children.toList
+          if child != null
+        } {
+          lStr += getWhereStr(child)
+        }
+        lStr
+      case BinaryExpr(column, operator, constantExpression) =>
+        val bStr = (if (column.alias.isEmpty) BLANK
+                    else BLANK + column.alias.get + SL_DOT) +
+          s"${column.name} $operator ${constantExpression.value}"
+        applyOptimization(bStr, column, operator, constantExpression)
+//      case _ => ""  // forced to throw error for unhandled cases for now
+    }
+  }
 
+  private def applyOptimization(bStr: String,
+                                column: Column,
+                                operator: String,
+                                constantExpression: ConstantExpr): String = {
+    var optimized = bStr
+    // TODO: make optimization fields dynamic instead of hardcoding
+    if (column.name.equalsIgnoreCase("member_id")) {
+      val constantVal = constantExpression.value
+      val partitionVal = constantVal.substring(constantVal.length - 3)
+      optimized += BLANK + SQL_AND + (if (column.alias.isEmpty) BLANK
+                                      else BLANK + column.alias.get + SL_DOT) +
+        s"last_digits $operator '$partitionVal"
+    }
+    optimized
+  }
+
+  def parseOrderBy(ast: ASTNode): String = {
+    var orderByStr = EMPTY
     ast.getToken.getType match {
-      case TOK_QUERY =>
+      case TOK_ORDERBY =>
+        orderByStr += BLANK + SQL_ORDER_BY
+        var fieldCtr = 0
         for {
           child <- ast.getChildren.toList
           if child != null
         } {
-          buffer ++= parse(child)
+          child.getToken.getType match {
+            case TOK_TABSORTCOLNAMEASC =>
+              fieldCtr += 1
+              if (fieldCtr > 1) orderByStr += SL_COMMA
+              orderByStr += parseOrderBy(
+                child.getChild(0).asInstanceOf[ASTNode]) + BLANK + SQL_ASC
+            case TOK_TABSORTCOLNAMEDESC =>
+              fieldCtr += 1
+              if (fieldCtr > 1) orderByStr += ","
+              orderByStr += parseOrderBy(
+                child.getChild(0).asInstanceOf[ASTNode]) + BLANK + SQL_DESC
+//            case _ => // force to throw exception for now
+          }
         }
-      case TOK_FROM =>
-        // Handles parsing for the tables
+      case TOK_NULLS_FIRST | TOK_NULLS_LAST =>
         for {
           child <- ast.getChildren.toList
           if child != null
         } {
-          buffer ++= parseTable(child)
+          orderByStr += parseOrderBy(child)
         }
-
-      case TOK_WHERE =>
-        // Handles WHERE clauses
-        for {
-          child <- ast.getChildren.toList
-          if child != null
-        } {
-          buffer ++= parseWhere2(child)
-        }
-
-      case TOK_INSERT =>
-        for {
-          child <- ast.getChildren.toList
-          if child != null
-        } {
-          buffer ++= parse(child)
-        }
-      case TOK_SELECT =>
-        for {
-          child <- ast.getChildren.toList
-          if child != null
-        } {
-          buffer ++= parseSelect(child)
-        }
-      case _ =>
-    }
-    buffer.toList
-  }
-
-  def parseSelect(ast: ASTNode): List[SelectExpr] = {
-    val buffer = ListBuffer[SelectExpr]()
-    ast.getType match {
-      case TOK_SELEXPR => for {
-        child <- ast.getChildren.toList
-        if child != null
-      } {
-        buffer ++= parseSelect(child)
-      }
-      case TOK_TABLE_OR_COL => for {
-        child <- ast.getChildren.toList
-        if child != null
-      } {
-        buffer += SelectField(Column(child.getText, None))
-      }
-      case TOK_ALLCOLREF =>
+      case TOK_TABLE_OR_COL =>
         ast.getChildren.toList match {
-          case child :: Nil =>
-            ast.getChildren.toList match {
-              case name :: Nil => buffer += SelectAll(Some(name.getText))
-              case _ =>
-            }
-          case _ => buffer += SelectAll()
+          case c1 :: Nil => orderByStr += BLANK + c1.getToken.getText
+//          case _ => // forced to throw error for unhandled cases
         }
-      case _ =>
-    }
-    buffer.toList
-  }
-
-  private def parseTable(ast: ASTNode): List[Table] = {
-    val buffer = ListBuffer[Table]()
-
-    ast.getType match {
-      case TOK_FROM | TOK_JOIN =>
-        // Parse JOINS recursively
-        for {
-          child <- ast.getChildren.toList
-          if child != null
-        } {
-          buffer ++= parseTable(child)
-        }
-
-      case TOK_TABREF =>
-        // Parse TABLE references
+      case DOT =>
         ast.getChildren.toList match {
-          case name :: alias :: Nil =>
-            name.getChildren.toList match {
-              case db :: tbName :: Nil =>
-                // Handle case where table with db name and alias
-                buffer += Table(tbName.getText,
-                                Some(db.getText),
-                                Some(alias.getText))
-              case tbName :: Nil =>
-                // Handle case where table with alias, without db name
-                buffer += Table(tbName.getText, None, Some(alias.getText))
-              case _ =>
-            }
-          case name :: Nil =>
-            name.getChildren.toList match {
-              case db :: tbName :: Nil =>
-                // Handle case where table with db name, without alias
-                buffer += Table(tbName.getText, Some(db.getText))
-              case tbName :: Nil =>
-                // Handle case where only table name is provided
-                buffer += Table(tbName.getText)
-              case _ =>
-            }
-
-          case _ =>
+          case c1 :: c2 :: Nil =>
+            orderByStr += BLANK + c1
+              .getChild(0)
+              .asInstanceOf[ASTNode]
+              .getToken
+              .getText
+            orderByStr += SL_DOT + c2.getToken.getText
+//          case _ => // forced to throw error for unhandled cases
         }
 
-      case _ =>
+//      case _ => // force to throw exception for now
     }
-
-    buffer.toList
-  }
-
-  /**
-    * Handles
-    * @param ast
-    * @return
-    */
-  private def parseWhere2(ast: ASTNode): List[BinaryExpr] = {
-    val buffer = ListBuffer[BinaryExpr]()
-
-    ast.getType match {
-      case EQUAL | EQUAL_NS | GREATERTHAN | GREATERTHANOREQUALTO | LESSTHAN |
-          LESSTHANOREQUALTO =>
-        val operator = ast.getText
-        ast.getChildren.toList match {
-          case child1 :: child2 :: Nil if child1.getType == DOT =>
-            // Handles case where column name has alias
-            child1.getChildren.toList match {
-              case head :: last :: Nil if head.getType == TOK_TABLE_OR_COL =>
-                head.getChildren.toList match {
-                  case alias :: Nil =>
-                    val column = Column(last.getText, Option(alias.getText))
-                    val constant = ConstantExpr(child2.getText)
-                    buffer += BinaryExpr(column, operator, constant)
-                  case _ =>
-                }
-              case _ =>
-            }
-
-          case child1 :: child2 :: Nil if child1.getType == TOK_TABLE_OR_COL =>
-            // Handles case where column name has no alias
-            val columnNode = child1.getChildren.toList.head
-            val column = Column(columnNode.getText)
-            val constant = ConstantExpr(child2.getText)
-            buffer += BinaryExpr(column, operator, constant)
-
-          case _ =>
-        }
-      case KW_AND | KW_OR =>
-        // Handle case where WHERE expression has multiple binary expression separated by AND/OR
-        for {
-          child <- ast.getChildren.toList
-          if child != null
-        } {
-          buffer ++= parseWhere2(child)
-        }
-      case _ =>
-    }
-
-    buffer.toList
+    orderByStr
   }
 
   implicit class ArrayListConverter(val arrayList: java.util.ArrayList[Node])
@@ -420,8 +412,10 @@ object HiveQueryOptimizer {
   object LogicalExpr {
     def unapply(arg: LogicalExpr): Option[ListBuffer[Expr]] = Some(arg.children)
   }
-  case class AndLogicalExpr(override val children: ListBuffer[Expr]) extends LogicalExpr(children)
-  case class OrLogicalExpr(override val children: ListBuffer[Expr]) extends LogicalExpr(children)
+  case class AndLogicalExpr(override val children: ListBuffer[Expr])
+      extends LogicalExpr(children)
+  case class OrLogicalExpr(override val children: ListBuffer[Expr])
+      extends LogicalExpr(children)
 
   case class Table(name: String,
                    db: Option[String] = None,
