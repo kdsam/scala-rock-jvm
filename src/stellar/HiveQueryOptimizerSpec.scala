@@ -12,14 +12,15 @@ import scala.util.Success
   *   <li>#3 GREATER THAN LESS THAN OPERATORS</li>
   *   <li>#4 OR and AND OPERATORS W/ PARENTHESIS/GROUPING</li>
   *   <li>#5 ORDER BY TEST CASES</li>
-  *   <li>#6 SUBQUERIES TEST CASES<li>
+  *   <li>#6 GROUP BY and HAVING TEST CASES<li>
+  *   <li>#7 SUBQUERIES TEST CASES<li>
   * </ul>
   */
 class HiveQueryOptimizerSpec extends FlatSpec with Matchers with Inside {
   behavior of "HiveQueryOptimizer"
 
 
- /*********************************** #1 SIMPLE QUERIES TEST CASES ********************************************/
+  /*********************************** #1 SIMPLE QUERIES TEST CASES ********************************************/
 
   it should "optimize simple queries" in {
     val sql =
@@ -213,6 +214,22 @@ class HiveQueryOptimizerSpec extends FlatSpec with Matchers with Inside {
     }
   }
 
+  it should "optimize simple queries with greater than operator in WHERE clause" in {
+    val sql =
+      s"""
+         |SELECT * FROM growingtree.member M WHERE age(birthdate) > 2
+       """.stripMargin
+    val result = HiveQueryOptimizer.optimize(sql)
+
+    inside(result) {
+      case Success(sqlStr) =>
+        sqlStr should equal(
+          s"""
+             |SELECT * FROM growingtree.member M WHERE age(birthdate) > 2
+           """.stripMargin.replaceAll("\n", "").trim)
+    }
+  }
+
   /******************************* #4 OR and AND OPERATORS W/ PARENTHESIS/GROUPING ************************************/
 
   it should "optimize simple queries with OR operator" in {
@@ -392,8 +409,99 @@ class HiveQueryOptimizerSpec extends FlatSpec with Matchers with Inside {
     }
   }
 
+  /*********************************** #6 GROUP BY and HAVING TEST CASES ******************************************************/
 
-  /*********************************** #6 SUBQUERIES TEST CASES ******************************************************/
+  it should "optimize queries with group by" in {
+    val sql =
+      s"""
+         |SELECT M.member_id, M.last_name, M.age FROM growingtree.member M WHERE test = true
+         | AND M.member_id = 'M-000000001' group by m.age
+       """.stripMargin
+    val result = HiveQueryOptimizer.optimize(sql)
+
+    inside(result) {
+      case Success(sqlStr) =>
+        sqlStr should equal(
+          s"""
+             |SELECT M.member_id, M.last_name, M.age FROM growingtree.member M WHERE test = true
+             | AND M.member_id = 'M-000000001' AND M.last_digits = '01' GROUP BY m.age
+           """.stripMargin.replaceAll("\n", "").trim)
+    }
+  }
+
+  it should "optimize queries with group by and Order by" in {
+    val sql =
+      s"""
+         |SELECT M.member_id, M.last_name, M.age FROM growingtree.member M WHERE test = true
+         | AND M.member_id = 'M-000000001' group by m.age order by m.age
+       """.stripMargin
+    val result = HiveQueryOptimizer.optimize(sql)
+
+    inside(result) {
+      case Success(sqlStr) =>
+        sqlStr should equal(
+          s"""
+             |SELECT M.member_id, M.last_name, M.age FROM growingtree.member M WHERE test = true
+             | AND M.member_id = 'M-000000001' AND M.last_digits = '01' GROUP BY m.age ORDER BY m.age ASC
+           """.stripMargin.replaceAll("\n", "").trim)
+    }
+  }
+
+  it should "optimize queries with group by and Order by desc" in {
+    val sql =
+      s"""
+         |SELECT M.member_id, M.last_name, M.age FROM growingtree.member M WHERE test = true
+         | AND M.member_id = 'M-000000001' group by m.age order by m.age desc
+       """.stripMargin
+    val result = HiveQueryOptimizer.optimize(sql)
+
+    inside(result) {
+      case Success(sqlStr) =>
+        sqlStr should equal(
+          s"""
+             |SELECT M.member_id, M.last_name, M.age FROM growingtree.member M WHERE test = true
+             | AND M.member_id = 'M-000000001' AND M.last_digits = '01' GROUP BY m.age ORDER BY m.age DESC
+           """.stripMargin.replaceAll("\n", "").trim)
+    }
+  }
+
+  it should "optimize queries with group by and Order by desc no alias" in {
+    val sql =
+      s"""
+         |SELECT member_id, last_name, age FROM growingtree.member WHERE test = true
+         | AND member_id = 'M-000000001' group by age order by age desc
+       """.stripMargin
+    val result = HiveQueryOptimizer.optimize(sql)
+
+    inside(result) {
+      case Success(sqlStr) =>
+        sqlStr should equal(
+          s"""
+             |SELECT member_id, last_name, age FROM growingtree.member WHERE test = true
+             | AND member_id = 'M-000000001' AND last_digits = '01' GROUP BY age ORDER BY age DESC
+           """.stripMargin.replaceAll("\n", "").trim)
+    }
+  }
+
+  it should "optimize queries with group by and having" in {
+    val sql =
+      s"""
+         |SELECT member_id, last_name, age FROM growingtree.member WHERE test = true
+         | AND member_id = 'M-000000001' GROUP BY age HAVING MAX(field1) - MIN(field2) > 10
+       """.stripMargin
+    val result = HiveQueryOptimizer.optimize(sql)
+
+    inside(result) {
+      case Success(sqlStr) =>
+        sqlStr should equal(
+          s"""
+             |SELECT member_id, last_name, age FROM growingtree.member WHERE test = true
+             | AND member_id = 'M-000000001' AND last_digits = '01' GROUP BY age HAVING MAX(field1) - MIN(field2) > 10
+           """.stripMargin.replaceAll("\n", "").trim)
+    }
+  }
+
+  /*********************************** #7 SUBQUERIES TEST CASES ******************************************************/
 
 
   it should "optimize simple subqueries" in {

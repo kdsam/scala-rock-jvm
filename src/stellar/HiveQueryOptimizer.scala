@@ -47,7 +47,33 @@ object HiveQueryOptimizer {
             if l2child != null && l2child.getToken.getType == TOK_WHERE
           } {
             if (ast.getToken.getType == TOK_SUBQUERY_EXPR) parseToSql(ast)
-            qstring += parseWhereExpr(l2child)
+            qstring += parseWhere(l2child)
+          }
+        }
+
+        // get GROUP BY
+        for {
+          child <- ast.getChildren.toList
+          if child != null && child.getToken.getType == TOK_INSERT
+        } {
+          for {
+            l2child <- child.getChildren.toList
+            if l2child != null && l2child.getToken.getType == TOK_GROUPBY
+          } {
+            qstring += parseGroupBy(l2child)
+          }
+        }
+
+        // get HAVING
+        for {
+          child <- ast.getChildren.toList
+          if child != null && child.getToken.getType == TOK_INSERT
+        } {
+          for {
+            l2child <- child.getChildren.toList
+            if l2child != null && l2child.getToken.getType == TOK_HAVING
+          } {
+            qstring += parseHaving(l2child)
           }
         }
 
@@ -63,6 +89,7 @@ object HiveQueryOptimizer {
             qstring += parseOrderBy(l2child)
           }
         }
+
         qstring
       case TOK_SUBQUERY_EXPR =>
         var appendStr = EMPTY
@@ -137,7 +164,7 @@ object HiveQueryOptimizer {
       child <- ast.getChildren.toList
       if child != null && child.getToken.getType == TOK_SELECT
     } {
-      var selFieldCtr = 0;
+      var selFieldCtr = 0
       for {
         l2child <- child.getChildren.toList
         if l2child != null && l2child.getToken.getType == TOK_SELEXPR
@@ -191,19 +218,19 @@ object HiveQueryOptimizer {
     appendStr
   }
 
-  def parseWhereExpr(ast: ASTNode): String = {
+  def parseWhere(ast: ASTNode): String = {
     var whereStr = BLANK + SQL_WHERE
     val child1 = ast.getChild(0).asInstanceOf[ASTNode]
     if (child1.getToken.getType == TOK_SUBQUERY_EXPR)
       whereStr += parseToSql(child1)
     else {
-      val rootExpr = parseWhere(ast)
+      val rootExpr = parseWhereToExpr(ast)
       whereStr += getWhereStr(rootExpr)
     }
     whereStr
   }
 
-  private def parseWhere(ast: ASTNode): Expr = {
+  private def parseWhereToExpr(ast: ASTNode): Expr = {
     ast.getToken.getType match {
       case TOK_WHERE =>
         val root = new LogicalExpr(ListBuffer())
@@ -211,7 +238,7 @@ object HiveQueryOptimizer {
           child <- ast.getChildren.toList
           if child != null
         } {
-          root.children += parseWhere(child)
+          root.children += parseWhereToExpr(child)
         }
         root
       case KW_OR =>
@@ -220,7 +247,7 @@ object HiveQueryOptimizer {
           child <- ast.getChildren.toList
           if child != null
         } {
-          orExpr.children += parseWhere(child)
+          orExpr.children += parseWhereToExpr(child)
         }
         orExpr
       case KW_AND =>
@@ -229,40 +256,49 @@ object HiveQueryOptimizer {
           child <- ast.getChildren.toList
           if child != null
         } {
-          andExpr.children += parseWhere(child)
+          andExpr.children += parseWhereToExpr(child)
         }
         andExpr
       case EQUAL | EQUAL_NS | GREATERTHAN | GREATERTHANOREQUALTO | LESSTHAN |
            LESSTHANOREQUALTO  =>
-        var colName: String = EMPTY
-        var tableAlias: String = EMPTY
-        var value: String = EMPTY
-        for {
-          child <- ast.getChildren.toList
-          if child != null
-        } {
-          child.getToken.getType match {
-            case TOK_TABLE_OR_COL =>
-              colName = child.getChild(0).getText
-            case DOT =>
-              tableAlias = child.getChild(0).getChild(0).getText
-              colName = child.getChild(1).getText
-            case KW_TRUE =>
-              value = TRUE_EXPR
-            case KW_FALSE =>
-              value = FALSE_EXPR
-            case StringLiteral =>
-              value = child.getText
-            case Number =>
-              value = child.getText
-          }
+        ast.getChild(0).asInstanceOf[ASTNode].getToken.getType match {
+          case TOK_TABLE_OR_COL | DOT => getColumnBinaryExpression(ast)
+          case TOK_FUNCTION => getFunctionBinaryExpression(ast)
         }
-        val column =
-          if (tableAlias.isEmpty) Column(colName)
-          else Column(colName, Some(tableAlias))
-        BinaryExpr(column, ast.getToken.getText, ConstantExpr(value))
-      case _ => new LogicalExpr(ListBuffer())
+//      case _ => // force to throw exception
     }
+  }
+
+  private def getFunctionBinaryExpression(node: ASTNode): BinaryExpr = ???
+
+  private def getColumnBinaryExpression(ast: ASTNode): BinaryExpr = {
+    var colName: String = EMPTY
+    var tableAlias: String = EMPTY
+    var value: String = EMPTY
+    for {
+      child <- ast.getChildren.toList
+      if child != null
+    } {
+      child.getToken.getType match {
+        case TOK_TABLE_OR_COL =>
+          colName = child.getChild(0).getText
+        case DOT =>
+          tableAlias = child.getChild(0).getChild(0).getText
+          colName = child.getChild(1).getText
+        case KW_TRUE =>
+          value = TRUE_EXPR
+        case KW_FALSE =>
+          value = FALSE_EXPR
+        case StringLiteral =>
+          value = child.getText
+        case Number =>
+          value = child.getText
+      }
+    }
+    val column =
+      if (tableAlias.isEmpty) Column(colName)
+      else Column(colName, Some(tableAlias))
+    BinaryExpr(column, ast.getToken.getText, ConstantExpr(value))
   }
 
   private def getWhereStr(rootExpr: Expr): String = {
@@ -277,9 +313,9 @@ object HiveQueryOptimizer {
           counter += 1
           child match {
             case LogicalExpr(_) =>
-              if (counter == 1) andStr += BLANK + OPEN_PAREN  + (getWhereStr(child)).substring(1) +
+              if (counter == 1) andStr += BLANK + OPEN_PAREN  + getWhereStr(child).substring(1) +
                 CLOSE_PAREN
-              else andStr += BLANK + SQL_AND + BLANK + OPEN_PAREN  + (getWhereStr(child)).substring(1) +
+              else andStr += BLANK + SQL_AND + BLANK + OPEN_PAREN  + getWhereStr(child).substring(1) +
                 CLOSE_PAREN
             case _ =>
               if (counter == 1)  andStr += getWhereStr(child)
@@ -297,9 +333,9 @@ object HiveQueryOptimizer {
           counter += 1
           child match {
             case LogicalExpr(_) =>
-              if (counter == 1) orStr += BLANK + OPEN_PAREN + (getWhereStr(child)).substring(1) +
+              if (counter == 1) orStr += BLANK + OPEN_PAREN + getWhereStr(child).substring(1) +
                 CLOSE_PAREN
-              else orStr += BLANK + SQL_OR + BLANK + OPEN_PAREN + (getWhereStr(child)).substring(1) +
+              else orStr += BLANK + SQL_OR + BLANK + OPEN_PAREN + getWhereStr(child).substring(1) +
                 CLOSE_PAREN
             case _ =>
               if (counter == 1)  orStr += getWhereStr(child)
@@ -316,7 +352,9 @@ object HiveQueryOptimizer {
           lStr += getWhereStr(child)
         }
         lStr
-      case BinaryExpr(column, operator, constantExpression) =>
+      case BinaryExpr(leftVal, operator, rightVal) =>
+        val column = leftVal.asInstanceOf[Column]
+        val constantExpression = rightVal.asInstanceOf[ConstantExpr]
         val bStr = (if (column.alias.isEmpty) BLANK
                     else BLANK + column.alias.get + SL_DOT) +
           s"${column.name} $operator ${constantExpression.value}"
@@ -341,6 +379,124 @@ object HiveQueryOptimizer {
     optimized
   }
 
+  def parseGroupBy(ast: ASTNode): String = {
+    var groupByStr = EMPTY
+    ast.getToken.getType match {
+      case TOK_GROUPBY =>
+        groupByStr += BLANK + SQL_GROUP_BY
+        var fieldCtr = 0
+        for {
+          child <- ast.getChildren.toList
+          if child != null
+        } {
+          child.getToken.getType match {
+            case DOT => groupByStr += parseGroupBy(child)
+            case TOK_TABLE_OR_COL => groupByStr += parseGroupBy(child)
+            case TOK_TABSORTCOLNAMEASC =>
+              fieldCtr += 1
+              if (fieldCtr > 1) groupByStr += SL_COMMA
+              groupByStr += parseGroupBy(
+                child.getChild(0).asInstanceOf[ASTNode]) + BLANK + SQL_ASC
+            case TOK_TABSORTCOLNAMEDESC =>
+              fieldCtr += 1
+              if (fieldCtr > 1) groupByStr += ","
+              groupByStr += parseGroupBy(
+                child.getChild(0).asInstanceOf[ASTNode]) + BLANK + SQL_DESC
+//            case _ => // force to throw exception for now
+          }
+        }
+      case TOK_NULLS_FIRST | TOK_NULLS_LAST =>
+        for {
+          child <- ast.getChildren.toList
+          if child != null
+        } {
+          groupByStr += parseGroupBy(child)
+        }
+      case TOK_TABLE_OR_COL =>
+        ast.getChildren.toList match {
+          case c1 :: Nil => groupByStr += BLANK + c1.getToken.getText
+//          case _ => // forced to throw error for unhandled cases
+        }
+      case DOT =>
+        ast.getChildren.toList match {
+          case c1 :: c2 :: Nil =>
+            groupByStr += BLANK + c1
+              .getChild(0)
+              .asInstanceOf[ASTNode]
+              .getToken
+              .getText
+            groupByStr += SL_DOT + c2.getToken.getText
+//          case _ => // forced to throw error for unhandled cases
+        }
+
+//      case _ => // force to throw exception for now
+    }
+    groupByStr
+  }
+
+  def parseHaving(ast: ASTNode): String = {
+    var havingStr = BLANK + SQL_HAVING
+    val rootExpr = parseHavingToExpr(ast)
+    havingStr += getHavingStr(rootExpr)
+    havingStr
+  }
+
+  private def parseHavingToExpr(node: ASTNode): Expr = ???
+
+  private def getHavingStr(rootExpr: Expr): String = ???
+  //  def parseHaving2(ast: ASTNode): String = {
+//    var havingStr = EMPTY
+//    ast.getToken.getType match {
+//      case TOK_HAVING =>
+//        havingStr += BLANK + SQL_ORDER_BY
+//        var fieldCtr = 0
+//        for {
+//          child <- ast.getChildren.toList
+//          if child != null
+//        } {
+//          child.getToken.getType match {
+//            case TOK_TABSORTCOLNAMEASC =>
+//              fieldCtr += 1
+//              if (fieldCtr > 1) orderByStr += SL_COMMA
+//              orderByStr += parseOrderBy(
+//                child.getChild(0).asInstanceOf[ASTNode]) + BLANK + SQL_ASC
+//            case TOK_TABSORTCOLNAMEDESC =>
+//              fieldCtr += 1
+//              if (fieldCtr > 1) orderByStr += ","
+//              orderByStr += parseOrderBy(
+//                child.getChild(0).asInstanceOf[ASTNode]) + BLANK + SQL_DESC
+//            //            case _ => // force to throw exception for now
+//          }
+//        }
+//      case TOK_NULLS_FIRST | TOK_NULLS_LAST =>
+//        for {
+//          child <- ast.getChildren.toList
+//          if child != null
+//        } {
+//          orderByStr += parseOrderBy(child)
+//        }
+//      case TOK_TABLE_OR_COL =>
+//        ast.getChildren.toList match {
+//          case c1 :: Nil => orderByStr += BLANK + c1.getToken.getText
+//          //          case _ => // forced to throw error for unhandled cases
+//        }
+//      case DOT =>
+//        ast.getChildren.toList match {
+//          case c1 :: c2 :: Nil =>
+//            orderByStr += BLANK + c1
+//              .getChild(0)
+//              .asInstanceOf[ASTNode]
+//              .getToken
+//              .getText
+//            orderByStr += SL_DOT + c2.getToken.getText
+//          //          case _ => // forced to throw error for unhandled cases
+//        }
+//
+//      //      case _ => // force to throw exception for now
+//    }
+//    orderByStr
+//  }
+
   def parseOrderBy(ast: ASTNode): String = {
     var orderByStr = EMPTY
     ast.getToken.getType match {
@@ -362,7 +518,7 @@ object HiveQueryOptimizer {
               if (fieldCtr > 1) orderByStr += ","
               orderByStr += parseOrderBy(
                 child.getChild(0).asInstanceOf[ASTNode]) + BLANK + SQL_DESC
-//            case _ => // force to throw exception for now
+            //            case _ => // force to throw exception for now
           }
         }
       case TOK_NULLS_FIRST | TOK_NULLS_LAST =>
@@ -375,7 +531,7 @@ object HiveQueryOptimizer {
       case TOK_TABLE_OR_COL =>
         ast.getChildren.toList match {
           case c1 :: Nil => orderByStr += BLANK + c1.getToken.getText
-//          case _ => // forced to throw error for unhandled cases
+          //          case _ => // forced to throw error for unhandled cases
         }
       case DOT =>
         ast.getChildren.toList match {
@@ -386,10 +542,10 @@ object HiveQueryOptimizer {
               .getToken
               .getText
             orderByStr += SL_DOT + c2.getToken.getText
-//          case _ => // forced to throw error for unhandled cases
+          //          case _ => // forced to throw error for unhandled cases
         }
 
-//      case _ => // force to throw exception for now
+      //      case _ => // force to throw exception for now
     }
     orderByStr
   }
@@ -422,11 +578,13 @@ object HiveQueryOptimizer {
                    alias: Option[String] = None)
       extends Expr
 
-  case class Column(name: String, alias: Option[String] = None)
+  sealed trait BinaryVal
 
-  case class BinaryExpr(column: Column,
+  case class Column(name: String, alias: Option[String] = None) extends BinaryVal
+
+  case class BinaryExpr(leftVal: BinaryVal,
                         operator: String,
-                        constantExpression: ConstantExpr)
+                        rightVal: BinaryVal)
       extends Expr
 
   sealed trait SelectExpr extends Expr
@@ -435,7 +593,7 @@ object HiveQueryOptimizer {
   case class SelectField(column: Column) extends SelectExpr
 
   // TODO: Do typing on this, right now this is all String
-  case class ConstantExpr(value: String) extends Expr
+  case class ConstantExpr(value: String) extends BinaryVal
 
   case class HiveQuery(original: String, suggested: String)
 }

@@ -19,6 +19,8 @@ object HiveQueryUtils {
   val SQL_WHERE = "WHERE"
   val SQL_AND = "AND"
   val SQL_OR = "OR"
+  val SQL_GROUP_BY = "GROUP BY"
+  val SQL_HAVING = "HAVING"
   val SQL_ORDER_BY = "ORDER BY"
   val SQL_ASC = "ASC"
   val SQL_DESC = "DESC"
