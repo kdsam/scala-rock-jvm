@@ -1,14 +1,24 @@
 package stellar
 
 import scala.collection.mutable.ListBuffer
-import scala.util.Try
+import scala.util.{Failure, Success, Try}
 
 /**
   * TODO: Documentation
   */
 object HiveQueryOptimizer {
 
-  def optimize(sql: String): Try[String] = {
+  def optimize(sql: String): OptimizeResult = {
+    val res = tryOptimize(sql)
+    res match {
+      case Success(value) =>
+        OptimizeResult(sql, true, value, None)
+      case Failure(e) =>
+        OptimizeResult(sql, false, sql, Some(e))
+    }
+  }
+
+  def tryOptimize(sql: String): Try[String] = {
     for {
       node <- Try(ParseUtils.parse(sql))
     } yield {
@@ -224,13 +234,13 @@ object HiveQueryOptimizer {
     if (child1.getToken.getType == TOK_SUBQUERY_EXPR)
       whereStr += parseToSql(child1)
     else {
-      val rootExpr = parseWhereToExpr(ast)
-      whereStr += getWhereStr(rootExpr)
+      val rootExpr = parseToExpr(ast)
+      whereStr += getStrFromExpr(rootExpr)
     }
     whereStr
   }
 
-  private def parseWhereToExpr(ast: ASTNode): Expr = {
+  private def parseToExpr(ast: ASTNode): Expr = {
     ast.getToken.getType match {
       case TOK_WHERE =>
         val root = new LogicalExpr(ListBuffer())
@@ -238,7 +248,16 @@ object HiveQueryOptimizer {
           child <- ast.getChildren.toList
           if child != null
         } {
-          root.children += parseWhereToExpr(child)
+          root.children += parseToExpr(child)
+        }
+        root
+      case TOK_HAVING =>
+        val root = new HavingExpr(ListBuffer())
+        for {
+          child <- ast.getChildren.toList
+          if child != null
+        } {
+          root.children += parseToExpr(child)
         }
         root
       case KW_OR =>
@@ -247,7 +266,7 @@ object HiveQueryOptimizer {
           child <- ast.getChildren.toList
           if child != null
         } {
-          orExpr.children += parseWhereToExpr(child)
+          orExpr.children += parseToExpr(child)
         }
         orExpr
       case KW_AND =>
@@ -256,20 +275,55 @@ object HiveQueryOptimizer {
           child <- ast.getChildren.toList
           if child != null
         } {
-          andExpr.children += parseWhereToExpr(child)
+          andExpr.children += parseToExpr(child)
         }
         andExpr
       case EQUAL | EQUAL_NS | GREATERTHAN | GREATERTHANOREQUALTO | LESSTHAN |
            LESSTHANOREQUALTO  =>
         ast.getChild(0).asInstanceOf[ASTNode].getToken.getType match {
           case TOK_TABLE_OR_COL | DOT => getColumnBinaryExpression(ast)
-          case TOK_FUNCTION => getFunctionBinaryExpression(ast)
+          case TOK_FUNCTION | MINUS  => getFunctionBinaryExpression(ast)
+//          case MINUS => getBinaryExpression(ast)
         }
 //      case _ => // force to throw exception
     }
   }
 
-  private def getFunctionBinaryExpression(node: ASTNode): BinaryExpr = ???
+//  private def getBinaryExpression(ast: ASTNode): BinaryExpr = {
+//    ast.getToken.getType match {
+//      case
+//    }
+//  }
+
+  private def getFunctionBinaryExpression(ast: ASTNode): BinaryExpr = {
+    ast.getChildren.toList match {
+      case c1 :: c2 :: Nil =>
+        val leftBinaryVal = getBinaryVal(c1)
+        val rightBinaryVal = getBinaryVal(c2)
+        BinaryExpr(leftBinaryVal, ast.getToken.getText, rightBinaryVal)
+//      case _ => // force to throw exception
+    }
+  }
+
+  private def getBinaryVal(ast: ASTNode): BinaryVal = {
+    ast.getToken.getType match {
+      case TOK_FUNCTION =>
+        val functionName = ast.getChild(0).getText
+        val params = ListBuffer[BinaryVal]()
+        params += getBinaryVal(ast.getChild(1).asInstanceOf[ASTNode])
+        SqlFunction(functionName, params: _*)
+      case TOK_TABLE_OR_COL =>
+        ast.getChildren.toList match {
+          case c1 :: Nil => Column(c1.getText)
+        }
+      case Number => NumberConstantExpr(ast.getText)
+      case MINUS =>
+        val leftBinaryVal = getBinaryVal(ast.getChild(0).asInstanceOf[ASTNode])
+        val rightBinaryVal = getBinaryVal(ast.getChild(1).asInstanceOf[ASTNode])
+        BinaryExpr(leftBinaryVal, ast.getToken.getText, rightBinaryVal)
+//      case _ => // force to throw exception
+    }
+  }
 
   private def getColumnBinaryExpression(ast: ASTNode): BinaryExpr = {
     var colName: String = EMPTY
@@ -298,10 +352,10 @@ object HiveQueryOptimizer {
     val column =
       if (tableAlias.isEmpty) Column(colName)
       else Column(colName, Some(tableAlias))
-    BinaryExpr(column, ast.getToken.getText, ConstantExpr(value))
+    BinaryExpr(column, ast.getToken.getText, StringConstantExpr(value))
   }
 
-  private def getWhereStr(rootExpr: Expr): String = {
+  private def getStrFromExpr(rootExpr: Expr): String = {
     rootExpr match {
       case AndLogicalExpr(children) =>
         var andStr = EMPTY
@@ -313,13 +367,13 @@ object HiveQueryOptimizer {
           counter += 1
           child match {
             case LogicalExpr(_) =>
-              if (counter == 1) andStr += BLANK + OPEN_PAREN  + getWhereStr(child).substring(1) +
+              if (counter == 1) andStr += BLANK + OPEN_PAREN  + getStrFromExpr(child).substring(1) +
                 CLOSE_PAREN
-              else andStr += BLANK + SQL_AND + BLANK + OPEN_PAREN  + getWhereStr(child).substring(1) +
+              else andStr += BLANK + SQL_AND + BLANK + OPEN_PAREN  + getStrFromExpr(child).substring(1) +
                 CLOSE_PAREN
             case _ =>
-              if (counter == 1)  andStr += getWhereStr(child)
-              else andStr += BLANK + SQL_AND + getWhereStr(child)
+              if (counter == 1)  andStr += getStrFromExpr(child)
+              else andStr += BLANK + SQL_AND + getStrFromExpr(child)
           }
         }
         andStr
@@ -333,13 +387,13 @@ object HiveQueryOptimizer {
           counter += 1
           child match {
             case LogicalExpr(_) =>
-              if (counter == 1) orStr += BLANK + OPEN_PAREN + getWhereStr(child).substring(1) +
+              if (counter == 1) orStr += BLANK + OPEN_PAREN + getStrFromExpr(child).substring(1) +
                 CLOSE_PAREN
-              else orStr += BLANK + SQL_OR + BLANK + OPEN_PAREN + getWhereStr(child).substring(1) +
+              else orStr += BLANK + SQL_OR + BLANK + OPEN_PAREN + getStrFromExpr(child).substring(1) +
                 CLOSE_PAREN
             case _ =>
-              if (counter == 1)  orStr += getWhereStr(child)
-              else orStr += BLANK + SQL_OR + getWhereStr(child)
+              if (counter == 1)  orStr += getStrFromExpr(child)
+              else orStr += BLANK + SQL_OR + getStrFromExpr(child)
           }
         }
         orStr
@@ -349,16 +403,45 @@ object HiveQueryOptimizer {
           child <- children.toList
           if child != null
         } {
-          lStr += getWhereStr(child)
+          lStr += getStrFromExpr(child)
         }
         lStr
+      case HavingExpr(children) =>
+        var havingStr = EMPTY
+        for {
+          child <- children.toList
+          if child != null
+        } {
+          havingStr += getStrFromExpr(child)
+        }
+        havingStr
       case BinaryExpr(leftVal, operator, rightVal) =>
-        val column = leftVal.asInstanceOf[Column]
-        val constantExpression = rightVal.asInstanceOf[ConstantExpr]
-        val bStr = (if (column.alias.isEmpty) BLANK
-                    else BLANK + column.alias.get + SL_DOT) +
-          s"${column.name} $operator ${constantExpression.value}"
-        applyOptimization(bStr, column, operator, constantExpression)
+        val leftStr = getStrFromExpr(leftVal)
+        val rightStr = getStrFromExpr(rightVal)
+        val bStr = leftStr + BLANK +  operator + BLANK + rightStr.trim
+        // TODO make this one dynamic
+        if (leftVal.isInstanceOf[Column])
+          applyOptimization(bStr, leftVal.asInstanceOf[Column], operator, rightVal.asInstanceOf[StringConstantExpr])
+        else bStr
+      case Column(name, alias) =>
+        val colStr = (if (alias.isEmpty) BLANK
+        else BLANK + alias.get + SL_DOT) + name
+        colStr
+      case SqlFunction(name, params @ _*) =>
+        var funcStr = BLANK + name + OPEN_PAREN
+        var paramCtr = 0;
+        for{
+          binaryVal <- params
+        } {
+          paramCtr += 1
+          if (paramCtr > 1) funcStr += SL_COMMA + BLANK
+          if (paramCtr == 1) funcStr += getStrFromExpr(binaryVal).substring(1)
+          else funcStr += getStrFromExpr(binaryVal)
+        }
+        funcStr += CLOSE_PAREN
+        funcStr
+      case StringConstantExpr(value) => value
+      case NumberConstantExpr(value) => value.toString
 //      case _ => ""  // forced to throw error for unhandled cases for now
     }
   }
@@ -366,7 +449,7 @@ object HiveQueryOptimizer {
   private def applyOptimization(bStr: String,
                                 column: Column,
                                 operator: String,
-                                constantExpression: ConstantExpr): String = {
+                                constantExpression: StringConstantExpr): String = {
     var optimized = bStr
     // TODO: make optimization fields dynamic instead of hardcoding
     if (column.name.equalsIgnoreCase("member_id")) {
@@ -436,8 +519,8 @@ object HiveQueryOptimizer {
 
   def parseHaving(ast: ASTNode): String = {
     var havingStr = BLANK + SQL_HAVING
-    val rootExpr = parseHavingToExpr(ast)
-    havingStr += getHavingStr(rootExpr)
+    val rootExpr = parseToExpr(ast)
+    havingStr += getStrFromExpr(rootExpr)
     havingStr
   }
 
@@ -573,19 +656,27 @@ object HiveQueryOptimizer {
   case class OrLogicalExpr(override val children: ListBuffer[Expr])
       extends LogicalExpr(children)
 
+  class HavingExpr(val children: ListBuffer[Expr]) extends Expr
+
+  object HavingExpr {
+    def unapply(arg: HavingExpr): Option[ListBuffer[Expr]] = Some(arg.children)
+  }
+
   case class Table(name: String,
                    db: Option[String] = None,
                    alias: Option[String] = None)
       extends Expr
 
-  sealed trait BinaryVal
+  sealed trait BinaryVal extends Expr
 
   case class Column(name: String, alias: Option[String] = None) extends BinaryVal
+
+  case class SqlFunction(funcName: String, params: BinaryVal*) extends BinaryVal
 
   case class BinaryExpr(leftVal: BinaryVal,
                         operator: String,
                         rightVal: BinaryVal)
-      extends Expr
+      extends BinaryVal
 
   sealed trait SelectExpr extends Expr
 
@@ -593,7 +684,11 @@ object HiveQueryOptimizer {
   case class SelectField(column: Column) extends SelectExpr
 
   // TODO: Do typing on this, right now this is all String
-  case class ConstantExpr(value: String) extends BinaryVal
+  case class StringConstantExpr(value: String) extends BinaryVal
+
+  case class NumberConstantExpr(value: String) extends BinaryVal
 
   case class HiveQuery(original: String, suggested: String)
+
+  case class OptimizeResult(original: String, optimized: Boolean, result: String, errorOpt: Option[Throwable])
 }
