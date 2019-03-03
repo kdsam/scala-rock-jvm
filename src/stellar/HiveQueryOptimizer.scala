@@ -54,8 +54,8 @@ import scala.util.{Failure, Success, Try}
   */
 object HiveQueryOptimizer {
 
-  def optimize(sql: String): OptimizeResult = {
-    val res = tryOptimize(sql)
+  def optimize(sql: String, optimizeDefs: OptimizeDefinition*): OptimizeResult = {
+    val res = tryOptimize(sql, optimizeDefs: _*)
     res match {
       case Success(value) =>
         OptimizeResult(sql, optimized = true, value, None)
@@ -64,21 +64,41 @@ object HiveQueryOptimizer {
     }
   }
 
-  def tryOptimize(sql: String): Try[String] = {
+  def tryOptimize(sql: String, optimizeDefs: OptimizeDefinition*): Try[String] = {
     for {
       node <- Try(parseToAst(sql))
     } yield {
-      val optimized = optimizeAST(node)
+      val optimized = optimizeAST(node, optimizeDefs: _*)
       parseToSql(optimized)
     }
   }
 
-  def optimizeAST(ast: ASTNode): ASTNode = {
+  def optimizeAST(ast: ASTNode, optimizeDefs: OptimizeDefinition*): ASTNode = {
     val opt = copyAST(ast)
-    for {
-      child <- ast.getChildren.toList
-    } {
-      opt.addChild(optimizeAST(child))
+    ast.getToken.getType match {
+      case KW_AND =>
+        for {
+          child <- ast.getChildren.toList
+        } {
+          opt.addChild(optimizeAST(child, optimizeDefs: _*))
+          val binExpr = parseToExpr(child)
+          for {
+            optDef <- optimizeDefs.toList
+          } {
+            // Do Optimization Here
+            if (optDef.ifPresent(binExpr)) {
+              val addtlOpt = optDef.applyOptimization(binExpr)
+              val addtAst = createAstFor(addtlOpt, child)
+              opt.addChild(addtAst)
+            }
+          }
+        }
+      case _ =>
+        for {
+          child <- ast.getChildren.toList
+        } {
+          opt.addChild(optimizeAST(child, optimizeDefs: _*))
+        }
     }
     opt
   }
@@ -779,15 +799,16 @@ object HiveQueryOptimizer {
         val leftStr = getStrFromExpr(leftVal)
         val rightStr = getStrFromExpr(rightVal)
         val bStr = leftStr + BLANK + operator + BLANK + rightStr.trim
-        // TODO make this one dynamic
-        rightVal match {
-          case expr: StringConstantExpr if leftVal.isInstanceOf[Column] =>
-            applyOptimization(bStr,
-                              leftVal.asInstanceOf[Column],
-                              operator,
-                              expr)
-          case _ => bStr
-        }
+//        // TODO make this one dynamic
+//        rightVal match {
+//          case expr: StringConstantExpr if leftVal.isInstanceOf[Column] =>
+//            applyOptimization(bStr,
+//                              leftVal.asInstanceOf[Column],
+//                              operator,
+//                              expr)
+//          case _ => bStr
+//        }
+        bStr
       case Column(name, alias) =>
         val colStr = (if (alias.isEmpty) BLANK
                       else BLANK + alias.get + SL_DOT) + name
@@ -1071,18 +1092,6 @@ object HiveQueryOptimizer {
 
   private def parseLimit(ast: ASTNode): String = {
     BLANK + SQL_LIMIT + BLANK + ast.getChild(0).getText
-  }
-
-  implicit class ArrayListConverter(val arrayList: java.util.ArrayList[Node])
-      extends AnyVal {
-    def toList: List[ASTNode] = {
-      if (arrayList != null) {
-        import scala.collection.JavaConverters._
-        arrayList.asScala.map(_.asInstanceOf[ASTNode]).toList
-      } else {
-        List.empty[ASTNode]
-      }
-    }
   }
 
   sealed trait Expr

@@ -1,6 +1,6 @@
 package stellar
 
-object HiveQueryUtils {
+object HiveQueryUtils extends StrictLogging {
 
   val EQUAL_OPERATOR = "="
   val TRUE_EXPR = "true"
@@ -54,7 +54,61 @@ object HiveQueryUtils {
   val SQL_TIMESTAMP = "TIMESTAMP"
 
   def copyAST(orig: ASTNode): ASTNode = {
-    val ast = new ASTNode(orig)
+    new ASTNode(orig)
+  }
+
+  def createAstFor(addtlOpt: Expr, copyFrom: ASTNode): ASTNode = {
+    val ast = new ASTNode(copyFrom)
+    addtlOpt match {
+      case BinaryExpr(leftVal, _, rightVal) =>
+        leftVal match {
+          case Column(name, _) =>
+            for {
+              child <- copyFrom.getChildren.toList
+            } {
+              ast.addChild(createAstFrom(child, name, rightVal.asInstanceOf[StringConstantExpr].value))
+            }
+          case _ => throw SLUnsupportedSQLConstruct("Unexpected construct")
+        }
+      case _ => throw SLUnsupportedSQLConstruct("Unexpected construct")
+    }
     ast
+  }
+
+  private def createAstFrom(copyFrom: ASTNode, colName: String, colVal: String): ASTNode = {
+    val ast = new ASTNode(copyFrom)
+    copyFrom.getToken.getType match {
+      case Identifier =>
+        copyFrom.getParent.asInstanceOf[ASTNode].getToken.getType match {
+          case EQUAL | DOT =>
+            val newToken = new CommonToken(ast.getToken)
+            newToken.setText(colName)
+            ast.token = newToken
+          case _ =>
+        }
+      case StringLiteral =>
+        val newToken = new CommonToken(ast.getToken)
+        newToken.setText(colVal)
+        ast.token = newToken
+      case _ =>
+    }
+    for {
+      child <- copyFrom.getChildren.toList
+    } {
+      ast.addChild(createAstFrom(child, colName, colVal))
+    }
+    ast
+  }
+
+  implicit class ArrayListConverter(val arrayList: java.util.ArrayList[Node])
+    extends AnyVal {
+    def toList: List[ASTNode] = {
+      if (arrayList != null) {
+        import scala.collection.JavaConverters._
+        arrayList.asScala.map(_.asInstanceOf[ASTNode]).toList
+      } else {
+        List.empty[ASTNode]
+      }
+    }
   }
 }
